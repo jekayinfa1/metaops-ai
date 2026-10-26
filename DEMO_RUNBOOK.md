@@ -26,7 +26,7 @@ Status: prepared 2026-10-26. The demo runs the REAL Muse models (live Meta Model
 
 - **"Is this live on real Pages?"** "The AI is live — real Muse Wonder and Spark calls, metered against our hackathon credit, with the receipt to prove it. The storefront in this demo is a simulated dataset because our developer account is sitting in a Meta confirmation checkpoint; the production connect flow (Facebook Login, long-lived Page tokens) is built and tested with a stubbed Graph transport, and the app 'FounderFlo Ops' exists in the console. Gate A — our own bar — requires both halves live, and we say plainly it is half passed."
 - **"How is this different from Manychat?"** "They sell automation. We sell verifiable operations: approval-bound actions, an independent audit pass, and a receipt for everything. Their pricing also scales per contact; ours is a flat subscription with transparent AI cost."
-- **"What does it cost to run?"** "The full 54-conversation run you just watched costs about $1.75 at list prices. Unit economics are modeled at 82–84% contribution margin on the $29/$79 pilot tiers."
+- **"What does it cost to run?"** "The full 54-conversation run you just watched costs about $1.75 at list prices. Paid pilot tiers are planned; the unit-economics model lives in the private commercial pack."
 - **"What about the 30-second response rule?"** "Approval-first is our wedge, so we do not auto-send. The compliance design treats the approval queue as the product surface; an instant auto-acknowledgement that sends nothing substantive is on the roadmap and deliberately not silently enabled."
 
 ## Fallbacks

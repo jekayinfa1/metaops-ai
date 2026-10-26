@@ -28,7 +28,7 @@ MetaOps AI runs a small business's Meta inbox end to end: it reads Facebook, Ins
 - Live operator run completed end-to-end on real Muse models: 34 classifications, 34 reply drafts, 2 content drafts, 36 audits (all final verdicts pass), 61 approved sends + 2 publishes, **97/97 receipt actions confirmed**, 21 leads identified.
 - Total live cost of that run: ~$1.75 at list prices, drawn on the $150 hackathon credit.
 - Test suite: 38 automated tests (operator workflow, auditor, approvals/idempotency/recovery, webhooks, data-deletion, OAuth connect flow).
-- Commercial validation pack: competitor teardown (Manychat, WATI, SleekFlow, respond.io, Sprout, Meta Business Agent), pricing and unit economics ($29/$79 pilot tiers modeled at ~82–84% contribution margin), target-customer and validation plan. Recommendation so far: validate further — customer demand is NOT yet claimed as validated (zero customer conversations held at time of writing).
+- Commercial validation pack: competitor teardown (Manychat, WATI, SleekFlow, respond.io, Sprout, Meta Business Agent), pricing and unit-economics analysis, target-customer and validation plan. Recommendation so far: validate further — customer demand is NOT yet claimed as validated (zero customer conversations held at time of writing).
 
 ## Honest limitations
 - The live run's platform side used a simulated (sandbox) storefront: our Meta developer account is in an account-confirmation checkpoint whose email codes Meta has not delivered, so a real-Page workflow is still pending. Gate A (our own acceptance bar: live AI **and** live platform) is half passed, and we say so.
