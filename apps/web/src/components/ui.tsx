@@ -9,7 +9,7 @@ import type { Platform } from "../lib/api";
 const PLATFORM_BRANDS: Record<string, { name: string; icon: SimpleIcon; cls: string }> = {
   facebook: { name: "Facebook", icon: siFacebook, cls: "bg-[#1877F2] text-white" },
   instagram: { name: "Instagram", icon: siInstagram, cls: "bg-gradient-to-tr from-amber-500 via-pink-600 to-purple-600 text-white" },
-  messenger: { name: "Messenger", icon: siMessenger, cls: "bg-gradient-to-tr from-[#0099FF] via-[#A033FF] to-[#FF5280] text-white" },
+  messenger: { name: "Messenger", icon: siMessenger, cls: "bg-gradient-to-br from-[#0099FF] from-0% via-[#A033FF] via-80% to-[#FF5280] text-white" },
   whatsapp: { name: "WhatsApp", icon: siWhatsapp, cls: "bg-[#25D366] text-white" }
 };
 
@@ -95,7 +95,7 @@ export const btnSecondary =
 export const btnDanger =
   "inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50";
 export const inputCls =
-  "w-full min-h-[44px] rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-sky-600 focus:ring-2 focus:ring-sky-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-50 dark:focus:ring-sky-900";
+  "w-full min-h-[44px] rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-base text-slate-900 sm:text-sm outline-none focus:border-sky-600 focus:ring-2 focus:ring-sky-200 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-50 dark:focus:ring-sky-900";
 export const labelCls = "mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400";
 
 export function useAsyncError(e: unknown): string {

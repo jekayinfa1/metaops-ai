@@ -119,7 +119,7 @@ export default function App() {
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-black leading-tight">FounderFlo Ops</p>
             {businesses.length > 0 ? (
-              <select aria-label="Active business" className="max-w-full bg-transparent text-xs text-slate-500 outline-none dark:text-slate-400"
+              <select aria-label="Active business" className="max-w-full bg-transparent text-base text-slate-500 outline-none dark:text-slate-400 sm:text-xs"
                 value={business?.id ?? ""} onChange={(e) => { setBusinessId(e.target.value); localStorage.setItem(BUSINESS_KEY, e.target.value); }}>
                 {businesses.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
               </select>
