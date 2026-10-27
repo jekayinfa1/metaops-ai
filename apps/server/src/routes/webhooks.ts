@@ -155,7 +155,11 @@ export async function webhookRoutes(app: FastifyInstance) {
     const q = req.query as Record<string, string>;
     const expected = verifyToken();
     if (!expected) return reply.code(503).send({ error: "webhook_not_configured" });
-    if (q["hub.mode"] === "subscribe" && q["hub.verify_token"] === expected && q["hub.challenge"]) {
+    // Timing-safe comparison: the verify token is a shared secret.
+    const providedBuf = Buffer.from(q["hub.verify_token"] ?? "");
+    const expectedBuf = Buffer.from(expected);
+    const tokenOk = providedBuf.length === expectedBuf.length && timingSafeEqual(providedBuf, expectedBuf);
+    if (q["hub.mode"] === "subscribe" && tokenOk && q["hub.challenge"]) {
       return reply.code(200).type("text/plain").send(q["hub.challenge"]);
     }
     return reply.code(403).send({ error: "verification_failed" });

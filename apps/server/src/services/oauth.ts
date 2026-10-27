@@ -87,7 +87,7 @@ export interface OAuthPage {
 export async function fetchUserPages(cfg: OAuthConfig, userToken: string): Promise<OAuthPage[]> {
   const q = new URLSearchParams({
     access_token: userToken,
-    fields: "id,name,category,access_token,perms,instagram_business_account{id,name,username}"
+    fields: "id,name,category,access_token,tasks,instagram_business_account{id,name,username}"
   });
   const body = await graphGet(cfg, `me/accounts?${q}`);
   const data = (body.data ?? []) as Array<Record<string, unknown>>;
@@ -98,7 +98,7 @@ export async function fetchUserPages(cfg: OAuthConfig, userToken: string): Promi
       name: String(p.name ?? "Unnamed Page"),
       category: String(p.category ?? ""),
       accessToken: String(p.access_token ?? ""),
-      perms: Array.isArray(p.perms) ? (p.perms as unknown[]).map(String) : [],
+      perms: Array.isArray(p.tasks) ? (p.tasks as unknown[]).map(String) : Array.isArray(p.perms) ? (p.perms as unknown[]).map(String) : [],
       instagramId: ig?.id ? String(ig.id) : null,
       instagramName: ig ? String(ig.username ?? ig.name ?? "") : null
     };

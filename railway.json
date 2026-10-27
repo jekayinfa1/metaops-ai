@@ -1,0 +1,1 @@
+{"$schema":"https://railway.com/railway.schema.json","build":{"buildCommand":"npm run build","builder":"RAILPACK"},"deploy":{"healthcheckPath":"/health","healthcheckTimeout":300,"restartPolicyMaxRetries":3,"restartPolicyType":"ON_FAILURE","startCommand":"node apps/server/dist/index.js"}}

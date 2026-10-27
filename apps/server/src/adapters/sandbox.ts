@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "../db/store.js";
-import type { PlatformAdapter, Capability, ExternalConversation, ConnectionRow } from "./types.js";
+import type { PlatformAdapter, Capability, ExternalConversation, ConnectionRow, SendTarget, TemplateSpec } from "./types.js";
 import { HARBOR_CONVERSATIONS } from "../services/seed-data.js";
 
 /**
@@ -50,17 +50,30 @@ export class SandboxAdapter implements PlatformAdapter {
     }));
   }
 
-  async sendMessage(threadExternalId: string, body: string, idempotencyKey: string) {
+  async sendMessage(target: SendTarget, body: string, idempotencyKey: string) {
     const d = getDb();
     const existing = d.prepare("SELECT id FROM sandbox_objects WHERE id=?").get("sbx_msg_" + idempotencyKey) as { id: string } | undefined;
     if (existing) return { externalId: existing.id, acceptedAt: new Date().toISOString() };
     const id = "sbx_msg_" + idempotencyKey;
     d.prepare("INSERT INTO sandbox_objects (id, connection_id, kind, payload_json, created_at) VALUES (?,?,?,?,?)")
-      .run(id, this.conn.id, "message", JSON.stringify({ threadExternalId, body }), new Date().toISOString());
+      .run(id, this.conn.id, "message", JSON.stringify({ threadId: target.threadId, recipientId: target.recipientId, body }), new Date().toISOString());
     return { externalId: id, acceptedAt: new Date().toISOString() };
   }
 
-  async publishPost(caption: string, idempotencyKey: string) {
+  async sendTemplate(target: SendTarget, template: TemplateSpec, idempotencyKey: string) {
+    if (this.platform !== "whatsapp") throw new Error(`template_not_supported_for_${this.platform}`);
+    const d = getDb();
+    const id = "sbx_tmpl_" + idempotencyKey;
+    const existing = d.prepare("SELECT id FROM sandbox_objects WHERE id=?").get(id) as { id: string } | undefined;
+    if (existing) return { externalId: existing.id, acceptedAt: new Date().toISOString() };
+    // The sandbox stands in for a WABA whose follow-up template is approved;
+    // the payload records that this approval is simulated, never real.
+    d.prepare("INSERT INTO sandbox_objects (id, connection_id, kind, payload_json, created_at) VALUES (?,?,?,?,?)")
+      .run(id, this.conn.id, "template_message", JSON.stringify({ threadId: target.threadId, recipientId: target.recipientId, template: template.name, language: template.language, simulatedTemplateApproval: true }), new Date().toISOString());
+    return { externalId: id, acceptedAt: new Date().toISOString() };
+  }
+
+  async publishPost(caption: string, idempotencyKey: string, _mediaUrl?: string) {
     const d = getDb();
     const id = "sbx_post_" + idempotencyKey;
     const existing = d.prepare("SELECT id FROM sandbox_objects WHERE id=?").get(id);

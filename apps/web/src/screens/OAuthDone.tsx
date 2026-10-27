@@ -57,12 +57,12 @@ export default function OAuthDone() {
       {state === "error" && (
         <div>
           <p className="mb-4">{message}</p>
-          <a className="underline" href="/">Back to MetaOps</a>
+          <a className="underline" href="/">Back to FounderFlo Ops</a>
         </div>
       )}
       {(state === "ready" || state === "connecting") && (
         <div>
-          <p className="mb-4">Choose which Pages MetaOps should operate. A linked Instagram professional account is connected automatically with its Page. Access tokens stay on the server, encrypted — they are never shown here.</p>
+          <p className="mb-4">Choose which Pages FounderFlo Ops should operate. A linked Instagram professional account is connected automatically with its Page. Access tokens stay on the server, encrypted — they are never shown here.</p>
           <div className="space-y-2 mb-4">
             {pages.map((p) => (
               <label key={p.pageId} className="flex items-start gap-2 border rounded p-3">
@@ -98,7 +98,7 @@ export default function OAuthDone() {
           <ul className="list-disc ml-5 mb-4">
             {connected.map((c, i) => <li key={i}>{c.displayName} ({c.platform})</li>)}
           </ul>
-          <a className="underline" href="/">Back to MetaOps</a>
+          <a className="underline" href="/">Back to FounderFlo Ops</a>
         </div>
       )}
     </div>

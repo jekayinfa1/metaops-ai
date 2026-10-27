@@ -1,20 +1,20 @@
 # Meta Developer App Setup — First Live Integration
 
-**Purpose:** the exact, ordered steps to take MetaOps AI from sandbox-only to its first real Meta integration. **Status: NOT DONE — no Meta app exists yet. Gate A remains unpassed.** Everything below is preparation; every step that touches Meta's console is a founder action (it requires Femi's Meta account). Times are estimates.
+**Purpose:** the exact, ordered steps to take MetaOps AI from sandbox-only to its first real Meta integration. **Status (updated 2026-10-26): PARTLY DONE.** §1 is complete — the Model API key is configured and live Muse calls are verified (two full operator runs, receipted; see BUILD_STATUS.md). The developer-console app **exists**: **"FounderFlo Ops" (App ID 1671236714578648)**, Unpublished, with Messenger + Instagram use cases (§2 done, under that name — Meta rejected "MetaOps AI" as a console app name). §§3–6 remain undone: the developer account is in an account-confirmation checkpoint that blocks the console, so no permissions have been requested, no test assets connected, and **the platform half of Gate A remains unpassed**. Every step that touches Meta's console is a founder action (it requires Femi's Meta account). Times are estimates.
 
 Prerequisite: FounderFlo LLC reinstatement is **not** needed for this first test phase (Standard Access + app roles work without Business Verification). It **is** needed later for Advanced Access / App Review (see META_API_COMPLIANCE.md).
 
 ---
 
-## 1. Model API key (≈5 min) — unblocks live AI, independent of the app below
+## 1. Model API key (≈5 min) — unblocks live AI, independent of the app below — ✅ DONE (2026-10-26)
 
 1. dev.meta.ai → sign in → API keys → create key. Confirm the account is on the **Standard** data tier (not Contributor) — see SECURE_KEY_SETUP.md.
 2. `./scripts/set-model-key.sh` in the repo (hidden prompt, writes gitignored `.env`, chmod 600).
 3. §6 smoke test A. **This alone flips the AI layer from heuristic to real Muse models**, with platform actions still in sandbox.
 
-## 2. Create the Meta app (≈10 min)
+## 2. Create the Meta app (≈10 min) — ✅ DONE (2026-10-26, as "FounderFlo Ops")
 
-1. developers.facebook.com → My Apps → Create App → type **Business** → name "MetaOps AI" → attach to the FounderFlo business portfolio (create one if prompted).
+1. developers.facebook.com → My Apps → Create App → type **Business** → name the app → attach to the FounderFlo business portfolio (create one if prompted). **Recorded outcome:** the name "MetaOps AI" was **rejected by Meta's console** (trademark — app names may not contain "Meta"); the app was created as **"FounderFlo Ops" (App ID 1671236714578648)**. The product name elsewhere is unchanged; whether "FounderFlo Ops" becomes the public-facing product name is a pending founder decision (BRANDING_REVIEW.md).
 2. Record (privately, not in this repo): App ID, App Secret. The App Secret is used server-side for webhook signature verification (`X-Hub-Signature-256`) — it will be stored like the model key when webhooks are built.
 3. Settings → Basic: add Privacy Policy URL and Terms URL (required for App Review later; the unpublished drafts in `validation/` are the starting point), app icon, category "Business and pages".
 
@@ -51,7 +51,7 @@ Standard Access is auto-granted but only works for people with a role in the app
 
 ## 5. Generate the first token and connect it in MetaOps (≈10 min)
 
-1. Graph API Explorer → select the MetaOps app → Get Page Access Token (log in, grant the §3 permissions, pick the test Page) → copy the **Page access token**. (For durability beyond the test, exchange for a long-lived token via the server-side OAuth flow — a known follow-up; the test token proves the integration first.)
+1. Graph API Explorer → select the **"FounderFlo Ops"** app → Get Page Access Token (log in, grant the §3 permissions, pick the test Page) → copy the **Page access token**. (For durability beyond the test, exchange for a long-lived token via the server-side OAuth flow — a known follow-up; the test token proves the integration first.)
 2. MetaOps → Connections → Add live connection: platform Facebook, paste the Page ID + token. The app stores it **AES-256-GCM encrypted**; the token is never returned by the API afterwards.
 3. Repeat for Instagram (IG user ID + token) and WhatsApp (WABA ID + phone number ID + token) as separate live connections.
 

@@ -132,7 +132,7 @@ export default function Connections({ business, onDemoLoaded }: { business: Busi
           <SectionTitle>Add a connection</SectionTitle>
           {business && (
             <div className="mb-4 rounded border p-3">
-              <p className="mb-2 text-sm">Recommended: sign in with Facebook and pick your Pages. MetaOps receives a long-lived Page token, stored encrypted on the server — no copying tokens by hand.</p>
+              <p className="mb-2 text-sm">Recommended: sign in with Facebook and pick your Pages. FounderFlo Ops receives a long-lived Page token, stored encrypted on the server — no copying tokens by hand.</p>
               <button type="button" className="rounded bg-black px-4 py-2 text-white" onClick={() => void connectWithFacebook()}>
                 Connect with Facebook
               </button>

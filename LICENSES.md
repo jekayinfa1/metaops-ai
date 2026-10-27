@@ -11,14 +11,14 @@ Runtime/build dependencies (all public npm packages under permissive licenses):
 | react, react-dom | Web client | MIT |
 | vite, @vitejs/plugin-react | Web build tooling | MIT |
 | tailwindcss, @tailwindcss/vite | Styling | MIT |
-| vite-plugin-pwa | PWA manifest/service worker | MIT |
 | typescript | Language tooling | Apache-2.0 |
 | vitest | Tests | MIT |
 | tsx | TS dev runner | MIT |
 
 Node.js built-ins used directly (node:sqlite, node:crypto) — no additional license obligations.
+The PWA manifest and service worker are hand-maintained static files in this repo — no PWA plugin dependency exists.
 Meta Graph API and Meta Model API are used under Meta's platform terms; no Meta code is vendored.
 
 ## Hackathon licensing note (for founder review before submitting)
 
-Before submitting, re-read the official Meta Global AI Developer Hackathon rules for: (1) any license the organizer claims over submission materials, (2) whether source code must be provided, and (3) what demo assets become public. This repository is private by default; do not publish it or hand over source until the founder has reviewed those terms. All demo data in this repo is synthetic (Harbor Goods).
+Before submitting, re-read the official Meta Global AI Developer Hackathon rules for: (1) any license the organizer claims over submission materials, (2) whether source code must be provided, and (3) what demo assets become public. This working repository is private. A public snapshot was published on 2026-10-26 (github.com/jekayinfa1/metaops-ai) with the founder's approval; it predates the latest fixes, and its contents must be treated as permanently disclosed (see EXPOSURE_AUDIT.md) — do not refresh it from this internal tree without a fresh exposure review. All demo data in this repo is synthetic (Harbor Goods).

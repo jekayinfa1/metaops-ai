@@ -1,5 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+// Hermetic scratch DB. This suite previously set NO database location, so
+// getDb() fell back to ./data and the suite wrote its throwaway user and
+// oauth_* audit rows into the DEVELOPMENT database on every run (found by
+// the Priority Seven testing campaign, 2026-10-26; see store.ts guard).
+process.env.METAOPS_DATA_DIR = mkdtempSync(path.join(tmpdir(), "metaops-oauth-"));
+process.env.METAOPS_SECRET = "<MASKED_SECRET_001>";
+delete process.env.MODEL_API_KEY;
 
 const RUN = Date.now();
 let app: FastifyInstance;
@@ -16,13 +27,18 @@ function stubGraph(url: string) {
     return ok({ access_token: "SHORT_USER_TOKEN" });
   if (u.pathname.endsWith("/oauth/access_token") && u.searchParams.has("fb_exchange_token"))
     return ok({ access_token: "LONG_USER_TOKEN", expires_in: 5184000 });
-  if (u.pathname.endsWith("/me/accounts"))
+  if (u.pathname.endsWith("/me/accounts")) {
+    // Mirror the real Graph API: the retired "perms" field is an error (#100),
+    // which is exactly what production returned on 2026-10-27 before the tasks fix.
+    if ((u.searchParams.get("fields") ?? "").includes("perms"))
+      return { ok: false, status: 400, json: async () => ({ error: { message: "(#100) Tried accessing nonexisting field (perms)", code: 100 } }) };
     return ok({
       data: [
-        { id: "111", name: "Harbor Test Page", category: "Shopping", access_token: "PAGE_TOKEN_A", perms: ["pages_messaging", "pages_read_engagement"], instagram_business_account: { id: "999", username: "harbortest" } },
-        { id: "222", name: "Second Page", category: "Services", access_token: "PAGE_TOKEN_B", perms: [] }
+        { id: "111", name: "Harbor Test Page", category: "Shopping", access_token: "PAGE_TOKEN_A", tasks: ["MANAGE", "CREATE_CONTENT"], instagram_business_account: { id: "999", username: "harbortest" } },
+        { id: "222", name: "Second Page", category: "Services", access_token: "PAGE_TOKEN_B", tasks: [] }
       ]
     });
+  }
   if (u.pathname.endsWith("/debug_token")) {
     const input = u.searchParams.get("input_token");
     if (input === "PAGE_TOKEN_A")

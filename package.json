@@ -3,13 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "description": "MetaOps AI - autonomous business operator for the Meta ecosystem (standalone hackathon project, FounderFlo LLC)",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "build": "npm run build -w @metaops/shared && npm run build -w @metaops/server && npm run build -w @metaops/web",
     "test": "vitest run",
     "dev:server": "npm run dev -w @metaops/server",
-    "dev:web": "npm run dev -w @metaops/web"
+    "dev:web": "npm run dev -w @metaops/web",
+    "start": "node apps/server/dist/index.js"
   },
-  "devDependencies": { "typescript": "^5.7.0", "vitest": "^2.1.0", "tsx": "^4.19.0" },
-  "engines": { "node": ">=22" }
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0",
+    "tsx": "^4.19.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "npm@10.9.4"
 }

@@ -107,7 +107,7 @@ export default function App() {
   }
 
   if (!authed) return <Auth onAuthed={() => setAuthed(true)} />;
-  if (loading) return <div className="flex min-h-dvh items-center justify-center"><Spinner label="Loading MetaOps AI..." /></div>;
+  if (loading) return <div className="flex min-h-dvh items-center justify-center"><Spinner label="Loading FounderFlo Ops..." /></div>;
 
   const go = (s: string) => setScreen(s as Screen);
 
@@ -115,9 +115,9 @@ export default function App() {
     <div className="min-h-dvh bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50">
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90">
         <div className="mx-auto flex max-w-5xl items-center gap-3 px-4 py-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-700 font-black text-white">M</div>
+          <img src="/logo-192.png" alt="FounderFlo Ops" className="h-9 w-9 rounded-xl object-cover" />
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-black leading-tight">MetaOps AI</p>
+            <p className="truncate text-sm font-black leading-tight">FounderFlo Ops</p>
             {businesses.length > 0 ? (
               <select aria-label="Active business" className="max-w-full bg-transparent text-xs text-slate-500 outline-none dark:text-slate-400"
                 value={business?.id ?? ""} onChange={(e) => { setBusinessId(e.target.value); localStorage.setItem(BUSINESS_KEY, e.target.value); }}>
@@ -139,8 +139,8 @@ export default function App() {
           </div>
         )}
         {aiStatus?.configured && (
-          <div className="border-t border-emerald-200 bg-emerald-50 px-4 py-1.5 text-center text-xs font-medium text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200" role="status">
-            Meta AI live: {aiStatus.primaryModel}{aiStatus.fallbackModel ? ` · fallback ${aiStatus.fallbackModel}` : ""}
+          <div className="flex items-center justify-center gap-1.5 border-t border-emerald-200 bg-emerald-50 px-4 py-1.5 text-center text-xs font-medium text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200" role="status">
+            <span>Meta AI live: {aiStatus.primaryModel}{aiStatus.fallbackModel ? ` · fallback ${aiStatus.fallbackModel}` : ""}</span>
           </div>
         )}
       </header>
@@ -162,7 +162,7 @@ export default function App() {
           {!business ? (
             <div className="space-y-4">
               <div className="rounded-2xl border border-slate-200 bg-white p-5 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
-                <h1 className="text-lg font-black">Welcome to MetaOps AI</h1>
+                <h1 className="text-lg font-black">Welcome to FounderFlo Ops</h1>
                 <p className="mx-auto mt-1 max-w-md text-sm text-slate-500 dark:text-slate-400">
                   First run: load the Harbor Goods demo to see the full workflow with sandbox connections and synthetic customers, or create your own business and connect real accounts.
                 </p>

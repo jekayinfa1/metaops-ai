@@ -24,8 +24,8 @@ export default function Auth({ onAuthed }: { onAuthed: () => void }) {
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-10">
       <div className="mb-8 text-center">
-        <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-sky-700 text-xl font-black text-white">M</div>
-        <h1 className="text-2xl font-black tracking-tight">MetaOps AI</h1>
+        <img src="/logo-512.png" alt="FounderFlo Ops" className="mx-auto mb-3 h-14 w-14 rounded-2xl object-cover" />
+        <h1 className="text-2xl font-black tracking-tight">FounderFlo Ops</h1>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
           The autonomous business operator for your Facebook, Instagram, Messenger and WhatsApp Business accounts.
         </p>

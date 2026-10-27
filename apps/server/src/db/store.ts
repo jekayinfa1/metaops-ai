@@ -22,8 +22,28 @@ export function getDb(): DatabaseSync {
     // METAOPS_DB (a directory) wins when set: the test suites use it to isolate
     // their databases; otherwise METAOPS_DATA_DIR, else ./data.
     const dir = process.env.METAOPS_DB || process.env.METAOPS_DATA_DIR || path.join(process.cwd(), "data");
+    // Test-hermeticity guard: under vitest the database MUST be an explicit
+    // scratch location. One suite (oauth) set no location and silently wrote
+    // its throwaway user + oauth_* audit rows into the development database
+    // on every run (found 2026-10-26). Fail loudly instead of ever letting a
+    // test process open ./data again. Inert outside vitest.
+    if (process.env.VITEST) {
+      if (!process.env.METAOPS_DB && !process.env.METAOPS_DATA_DIR) {
+        throw new Error("test isolation: METAOPS_DB or METAOPS_DATA_DIR must point at a scratch directory under vitest; refusing to open the default ./data database");
+      }
+      if (path.resolve(dir) === path.resolve(process.cwd(), "data")) {
+        throw new Error("test isolation: the configured test database directory resolves to the development data directory; refusing to open it under vitest");
+      }
+    }
     mkdirSync(dir, { recursive: true });
     db = new DatabaseSync(path.join(dir, "metaops.db"));
+    // WAL lets readers coexist with the single writer; busy_timeout makes a
+    // contended write wait instead of throwing SQLITE_BUSY. An unhandled busy
+    // error in the task engine killed the whole server mid-run on 2026-10-26;
+    // these pragmas plus the engine's launch guard are the fix.
+    db.exec("PRAGMA journal_mode=WAL;");
+    db.exec("PRAGMA busy_timeout=5000;");
+    db.exec("PRAGMA synchronous=NORMAL;");
     migrate(db);
   }
   return db;

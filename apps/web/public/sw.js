@@ -1,7 +1,7 @@
 /* MetaOps AI service worker: app-shell precache, network-first navigation,
    API requests are never cached (live business data). */
-const CACHE = "metaops-shell-v1";
-const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg"];
+const CACHE = "metaops-shell-v2";
+const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/logo-192.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

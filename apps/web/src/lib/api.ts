@@ -1,5 +1,15 @@
-// MetaOps AI API client. The auth token lives in localStorage; Meta platform
-// access tokens NEVER reach the browser - they stay encrypted server-side.
+// MetaOps AI API client. The session token lives in localStorage; Meta
+// platform access tokens NEVER reach the browser - they stay encrypted
+// server-side.
+//
+// Session-storage posture (known, documented residual risk): a localStorage
+// token is readable by any JavaScript running on this origin, so an XSS hole
+// would expose it. Containments in place: sessions expire after 8 hours and
+// are registered server-side, so they can be revoked at any time — sign-out
+// kills the current session, and a password change or "sign out everywhere"
+// kills all of them (see the authApi helpers below). The remaining exposure
+// is bounded to one revocable 8-hour session; a full migration to httpOnly
+// cookie sessions is the recorded follow-up, not yet done.
 
 export const TOKEN_KEY = "metaops_token";
 export const BUSINESS_KEY = "metaops_business_id";
@@ -37,6 +47,22 @@ export const api = {
   post: <T>(p: string, body?: unknown) => req<T>(p, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }),
   put: <T>(p: string, body?: unknown) => req<T>(p, { method: "PUT", body: body === undefined ? undefined : JSON.stringify(body) }),
   del: <T>(p: string) => req<T>(p, { method: "DELETE" })
+};
+
+// Session management against the server-side session registry. Server-side
+// revocation is the point: clearing localStorage alone never invalidated a
+// token before, now logout actually kills the session server-side too.
+export const authApi = {
+  async logout(): Promise<void> {
+    try { await api.post("/api/auth/logout"); } finally { setToken(null); }
+  },
+  async logoutAll(): Promise<void> {
+    try { await api.post("/api/auth/logout-all"); } finally { setToken(null); }
+  },
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    const res = await api.post<{ token: string }>("/api/auth/change-password", { currentPassword, newPassword });
+    setToken(res.token); // every older session was revoked; adopt the fresh one
+  }
 };
 
 // ---------- shared shapes (mirrors the server contract) ----------

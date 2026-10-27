@@ -4,6 +4,7 @@ import { adapterFor } from "../adapters/factory.js";
 import type { ConnectionRow } from "../adapters/types.js";
 import { planObjective, classifyMessage, draftReply, draftContent, auditDraft, correctDraft, activePlannerModel, type BusinessContext, type AuditInput } from "./ai.js";
 import { payloadHash } from "./security.js";
+import { classifyExternalVerification } from "./receipt.js";
 import type { Plan, ReceiptAction } from "@metaops/shared";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -12,7 +13,7 @@ const paused = new Set<string>();
 const cancelled = new Set<string>();
 
 interface BizRow { id: string; userId: string; name: string; description: string; hours: string; location: string; returnPolicy: string; tone: string; escalationContact: string; faqsJson: string }
-interface ConvRow { id: string; businessId: string; connectionId: string; platform: string; externalThreadId: string; customerName: string; category: string | null; suggestedReply: string | null }
+interface ConvRow { id: string; businessId: string; connectionId: string; platform: string; externalThreadId: string; customerName: string; customerRef: string; category: string | null; suggestedReply: string | null }
 interface StepRow { id: string; taskId: string; seq: number; operation: string; platform: string | null; requiresApproval: number; status: string; attempts: number; idempotencyKey: string }
 
 const d = () => getDb();
@@ -58,7 +59,17 @@ export function emit(taskId: string) {
 }
 
 export function pauseTask(id: string) { paused.add(id); setTaskState(id, "paused"); }
-export function resumeTask(id: string) { paused.delete(id); void runTask(id); }
+// Last-resort guard: a task may fail, the process must not. runTask is
+// fire-and-forget at every call site, so an escaping error would otherwise
+// surface as an unhandled rejection and terminate the server (it did, on a
+// SQLITE_BUSY during a live run, 2026-10-26).
+export function launchTask(id: string) {
+  void runTask(id).catch((err) => {
+    console.error("runTask failed:", err);
+    try { setTaskState(id, "failed", "engine_error: " + (err instanceof Error ? err.message : String(err))); } catch { /* database still unavailable */ }
+  });
+}
+export function resumeTask(id: string) { paused.delete(id); launchTask(id); }
 export function cancelTask(id: string) {
   cancelled.add(id);
   d().prepare("UPDATE tasks SET state='cancelled', finished_at=? WHERE id=? AND state NOT IN ('completed','partially_completed','failed')").run(now(), id);
@@ -70,7 +81,7 @@ export async function createTask(businessId: string, userId: string, objective: 
   d().prepare("INSERT INTO tasks (id, business_id, user_id, objective, state, created_at) VALUES (?,?,?,?, 'created', ?)")
     .run(id, businessId, userId, objective, now());
   audit("user:" + userId, "task_created", id);
-  void runTask(id);
+  launchTask(id);
   return id;
 }
 
@@ -167,6 +178,71 @@ async function withRetry(taskId: string, step: StepRow, fn: () => Promise<string
   throw lastErr ?? new Error("step_failed");
 }
 
+/**
+ * External-action ledger: application-level idempotency for live platform
+ * mutations (Meta's send/publish endpoints have no native idempotency key).
+ * Intent is persisted BEFORE the provider call, the attempt is marked, and
+ * the provider's outcome is recorded. A retry with the same key:
+ * - replays a recorded "accepted" outcome without calling the provider;
+ * - finds a prior "attempted" row with no recorded outcome (the request may
+ *   have landed but the response was lost) and reports UNVERIFIED instead of
+ *   blind-resending;
+ * - may re-attempt only after a DEFINITE provider refusal (a 4xx response or
+ *   a pre-flight validation error proves nothing was sent).
+ */
+export type ExternalOutcome =
+  | { kind: "accepted"; externalId: string; acceptedAt: string; replayed: boolean }
+  | { kind: "unverified"; detail: string };
+
+const DEFINITE_FAILURE = /^(graph_api_4\d\d|\w+_recipient_missing|instagram_publish_requires_media_url|instagram_publish_no_|facebook_publish_no_|publish_not_supported|template_not_supported|whatsapp_template_not_approved|whatsapp_template_unverifiable)/;
+
+let ledgerReady = false;
+function ensureLedger() {
+  if (ledgerReady) return;
+  d().exec(`CREATE TABLE IF NOT EXISTS action_executions (
+    idempotency_key TEXT PRIMARY KEY, kind TEXT NOT NULL, platform TEXT, target_ref TEXT,
+    status TEXT NOT NULL, external_id TEXT, detail TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+  ledgerReady = true;
+}
+
+export async function executeExternalAction(
+  key: string,
+  meta: { kind: string; platform?: string; targetRef?: string },
+  fn: () => Promise<{ externalId: string; acceptedAt: string }>
+): Promise<ExternalOutcome> {
+  ensureLedger();
+  const db = d();
+  const prior = db.prepare("SELECT status, external_id as externalId, detail FROM action_executions WHERE idempotency_key=?").get(key) as unknown as { status: string; externalId: string | null; detail: string | null } | undefined;
+  if (prior?.status === "accepted" && prior.externalId) {
+    return { kind: "accepted", externalId: prior.externalId, acceptedAt: now(), replayed: true };
+  }
+  if (prior?.status === "attempted" || prior?.status === "unverified") {
+    return { kind: "unverified", detail: `A previous attempt for this action was made but its outcome was never recorded (${prior.detail ?? "response lost"}). Not resent; reconcile against the platform before any manual retry.` };
+  }
+  if (prior?.status === "failed") {
+    db.prepare("DELETE FROM action_executions WHERE idempotency_key=?").run(key);
+  }
+  db.prepare("INSERT INTO action_executions (idempotency_key, kind, platform, target_ref, status, created_at, updated_at) VALUES (?,?,?,?, 'intent', ?, ?)")
+    .run(key, meta.kind, meta.platform ?? null, meta.targetRef ?? null, now(), now());
+  db.prepare("UPDATE action_executions SET status='attempted', updated_at=? WHERE idempotency_key=?").run(now(), key);
+  try {
+    const result = await fn();
+    db.prepare("UPDATE action_executions SET status='accepted', external_id=?, updated_at=? WHERE idempotency_key=?").run(result.externalId, now(), key);
+    return { kind: "accepted", externalId: result.externalId, acceptedAt: result.acceptedAt, replayed: false };
+  } catch (e) {
+    const message = (e as Error).message;
+    if (DEFINITE_FAILURE.test(message)) {
+      db.prepare("UPDATE action_executions SET status='failed', detail=?, updated_at=? WHERE idempotency_key=?").run(message.slice(0, 300), now(), key);
+      throw e;
+    }
+    // Ambiguous: network error, timeout, or a 5xx — the request may have
+    // landed. Leave the row "attempted" so any retry reports unverified.
+    db.prepare("UPDATE action_executions SET detail=?, updated_at=? WHERE idempotency_key=?").run(message.slice(0, 300), now(), key);
+    return { kind: "unverified", detail: `Provider attempt outcome unknown (${message.slice(0, 200)}). The action was not resent; it stays unverified until reconciled against the platform.` };
+  }
+}
+
 function pendingApproval(taskId: string, businessId: string, kind: string, platform: string, summary: string, payload: unknown): string {
   const existing = d().prepare("SELECT id FROM approvals WHERE task_id=? AND payload_hash=? AND status='pending'").get(taskId, payloadHash(payload)) as { id: string } | undefined;
   if (existing) return existing.id;
@@ -190,22 +266,31 @@ async function auditLoop(taskId: string, input: AuditInput, actions: ReceiptActi
   const first = await auditDraft(taskId, input);
   recordAudit(taskId, input.kind, target, 1, first.ok, first.violations, first.injectionDetected, first.auditorModel);
   if (first.ok) {
-    actions.push({ operation: "audit_draft", platform: input.platform, target, status: "confirmed", detail: `Auditor pass (${first.auditorModel}).${first.injectionDetected ? " Injection attempt detected in the customer message; draft does not comply with it." : ""}` });
+    actions.push({ operation: "audit_draft", platform: input.platform, target, status: "confirmed", draft: input.draftText, detail: `Auditor pass (${first.auditorModel}).${first.injectionDetected ? " Injection attempt detected in the customer message; draft does not comply with it." : ""}` });
     return { text: input.draftText, templateRequired: false };
   }
-  actions.push({ operation: "audit_draft", platform: input.platform, target, status: "blocked", detail: `Auditor BLOCKED draft: ${first.violations.map((v) => `${v.type} - ${v.detail}`).join("; ")}` });
+  actions.push({ operation: "audit_draft", platform: input.platform, target, status: "blocked", draft: input.draftText, detail: `Auditor BLOCKED draft: ${first.violations.map((v) => `${v.type} - ${v.detail}`).join("; ")}` });
   const corrected = correctDraft(input, first.violations);
   // A template message is the compliant way to reach an out-of-window customer,
   // so the re-audit evaluates the corrected text as a template (window rule N/A).
   const second = await auditDraft(taskId, { ...input, draftText: corrected.text, lastInboundAt: corrected.templateRequired ? null : input.lastInboundAt });
   recordAudit(taskId, input.kind, target, 2, second.ok, second.violations, second.injectionDetected, second.auditorModel);
   if (second.ok) {
-    actions.push({ operation: "audit_draft", platform: input.platform, target, status: "confirmed", detail: `Self-corrected draft passed re-audit (${second.auditorModel}).${corrected.templateRequired ? " Converted to a template message because the conversation is outside the 24h window." : ""}` });
+    actions.push({ operation: "audit_draft", platform: input.platform, target, status: "confirmed", draft: corrected.text, detail: `Self-corrected draft passed re-audit (${second.auditorModel}).${corrected.templateRequired ? " Converted to a template message because the conversation is outside the 24h window." : ""}` });
     return { text: corrected.text, templateRequired: corrected.templateRequired };
   }
-  actions.push({ operation: "audit_draft", platform: input.platform, target, status: "failed", detail: `Draft failed audit twice and was withheld from approvals (fail-closed): ${second.violations.map((v) => v.type).join(", ")}` });
+  actions.push({ operation: "audit_draft", platform: input.platform, target, status: "failed", draft: corrected.text, detail: `Draft failed audit twice and was withheld from approvals (fail-closed): ${second.violations.map((v) => v.type).join(", ")}` });
   return null;
 }
+
+/**
+ * The WhatsApp template the workflow requests for out-of-window follow-ups
+ * (the auditor's corrected draft for those threads is a generic follow-up).
+ * A business must have an APPROVED template with this exact name/language on
+ * its WhatsApp Business Account; the Graph adapter verifies that against the
+ * WABA before sending and the send blocks if it cannot be verified.
+ */
+const WA_FOLLOWUP_TEMPLATE = { name: "follow_up", language: "en_US" };
 
 // ---------------- Step executors ----------------
 
@@ -289,7 +374,7 @@ async function executeStep(taskId: string, businessId: string, step: StepRow): P
     }
 
     case "send_approved_replies": {
-      const convs = d().prepare("SELECT id, business_id as businessId, connection_id as connectionId, platform, external_thread_id as externalThreadId, customer_name as customerName, category, product_interest as productInterest, suggested_reply as suggestedReply, template_required as templateRequired FROM conversations WHERE business_id=? AND suggested_reply IS NOT NULL AND workflow_state IN ('drafted','awaiting_approval')").all(businessId) as unknown as ConvRow[];
+      const convs = d().prepare("SELECT id, business_id as businessId, connection_id as connectionId, platform, external_thread_id as externalThreadId, customer_name as customerName, customer_ref as customerRef, category, product_interest as productInterest, suggested_reply as suggestedReply, template_required as templateRequired FROM conversations WHERE business_id=? AND suggested_reply IS NOT NULL AND workflow_state IN ('drafted','awaiting_approval')").all(businessId) as unknown as ConvRow[];
       let needsApproval = false;
       for (const conv of convs) {
         const payload = { conversationId: conv.id, platform: conv.platform, to: conv.customerName, body: conv.suggestedReply, template: Boolean((conv as unknown as { templateRequired: number }).templateRequired) };
@@ -307,19 +392,50 @@ async function executeStep(taskId: string, businessId: string, step: StepRow): P
           actions.push({ operation: step.operation, platform: conv.platform, target: conv.customerName, status: "skipped", detail: `Approval ${approval.status}; message not sent.` });
           continue;
         }
-        // approved: send with idempotency; verify by read-back before claiming confirmation.
+        // approved: send through the idempotency ledger; verify by read-back
+        // before claiming confirmation. The send targets the customer's
+        // platform-scoped recipient id (customer_ref: PSID / phone), never
+        // the conversation id. WhatsApp conversations the auditor marked
+        // template_required (outside the 24h window) go through the template
+        // path — never a free-form text send.
         const conn = conns.find((c) => c.id === (d().prepare("SELECT connection_id as cid FROM conversations WHERE id=?").get(conv.id) as { cid: string }).cid);
         if (!conn) throw new Error("connection_missing_for_conversation");
         const adapter = adapterFor(conn);
         const idem = `${taskId}:send:${conv.id}`;
-        const sent = await adapter.sendMessage(conv.externalThreadId, conv.suggestedReply!, idem);
+        const target = { threadId: conv.externalThreadId, recipientId: conv.customerRef ?? "" };
+        const needsTemplate = conv.platform === "whatsapp" && Boolean((conv as unknown as { templateRequired: number }).templateRequired);
+        let outcome: ExternalOutcome;
+        try {
+          outcome = await executeExternalAction(idem, { kind: needsTemplate ? "send_template" : "send_message", platform: conv.platform, targetRef: target.recipientId },
+            () => needsTemplate
+              ? adapter.sendTemplate(target, WA_FOLLOWUP_TEMPLATE, idem)
+              : adapter.sendMessage(target, conv.suggestedReply!, idem));
+        } catch (e) {
+          // Template verification refused the send before anything was sent:
+          // a policy block, recorded as such — not a send failure, no retry.
+          if ((e as Error).message.startsWith("whatsapp_template_")) {
+            d().prepare("UPDATE conversations SET workflow_state='template_blocked' WHERE id=?").run(conv.id);
+            actions.push({ operation: step.operation, platform: conv.platform, target: conv.customerName, status: "blocked", detail: `Template send blocked: ${(e as Error).message}`,
+              verification: classifyExternalVerification({ kind: "send_template", platform: conv.platform, mode: conn.mode, phase: "not_attempted", note: `Blocked before any provider attempt: ${(e as Error).message}` }) });
+            continue;
+          }
+          throw e;
+        }
+        if (outcome.kind === "unverified") {
+          d().prepare("UPDATE conversations SET workflow_state='sent_unverified' WHERE id=?").run(conv.id);
+          actions.push({ operation: step.operation, platform: conv.platform, target: conv.customerName, status: "accepted_unconfirmed", detail: outcome.detail,
+            verification: classifyExternalVerification({ kind: needsTemplate ? "send_template" : "send_message", platform: conv.platform, mode: conn.mode, phase: "attempted_unknown", note: outcome.detail }) });
+          continue;
+        }
+        const sent = outcome;
         d().prepare("INSERT OR IGNORE INTO messages (id, conversation_id, direction, body, at, status, external_id, idempotency_key) VALUES (?,?, 'out', ?, ?, 'sent', ?, ?)")
           .run(randomUUID(), conv.id, conv.suggestedReply, now(), sent.externalId, idem);
         setTaskState(taskId, "verifying");
         const check = await adapter.getObject(sent.externalId);
         d().prepare("UPDATE conversations SET workflow_state=?, lead_status=CASE WHEN lead_status='potential_lead' THEN 'contacted' ELSE lead_status END WHERE id=?")
           .run(check.exists ? "sent_confirmed" : "sent_unverified", conv.id);
-        actions.push({ operation: step.operation, platform: conv.platform, target: conv.customerName, status: check.exists ? "confirmed" : "accepted_unconfirmed", detail: check.exists ? `Platform read-back confirmed message ${sent.externalId}.` : `Platform accepted message ${sent.externalId} but read-back did not confirm it.`, externalId: sent.externalId });
+        actions.push({ operation: step.operation, platform: conv.platform, target: conv.customerName, status: check.exists ? "confirmed" : "accepted_unconfirmed", detail: check.exists ? `${conn.mode === "sandbox" ? "Sandbox" : "Platform"} read-back confirmed message ${sent.externalId}${sent.replayed ? " (idempotent replay: recorded outcome reused, not resent)" : ""}.` : `${conn.mode === "sandbox" ? "Sandbox" : "Platform"} accepted message ${sent.externalId} but read-back did not confirm it.`, externalId: sent.externalId,
+          verification: classifyExternalVerification({ kind: needsTemplate ? "send_template" : "send_message", platform: conv.platform, mode: conn.mode, phase: "accepted", externalId: sent.externalId, readBack: check }) });
         setTaskState(taskId, "running");
       }
       updateStep(step.id, { detail: `${actions.length} repl${actions.length === 1 ? "y" : "ies"} processed` });
@@ -384,11 +500,20 @@ async function executeStep(taskId: string, businessId: string, step: StepRow): P
         if (!conn) { actions.push({ operation: step.operation, platform: item.platform, target: item.platform, status: "blocked", detail: "No connected account for this platform." }); continue; }
         const adapter = adapterFor(conn);
         try {
-          const published = await adapter.publishPost(item.caption, `${taskId}:publish:${item.id}`);
+          const outcome = await executeExternalAction(`${taskId}:publish:${item.id}`, { kind: "publish_post", platform: item.platform, targetRef: conn.externalAccountId },
+            () => adapter.publishPost(item.caption, `${taskId}:publish:${item.id}`));
+          if (outcome.kind === "unverified") {
+            d().prepare("UPDATE content_items SET status='unverified' WHERE id=?").run(item.id);
+            actions.push({ operation: step.operation, platform: item.platform, target: item.platform, status: "accepted_unconfirmed", detail: outcome.detail,
+              verification: classifyExternalVerification({ kind: "publish_post", platform: item.platform, mode: conn.mode, phase: "attempted_unknown", note: outcome.detail }) });
+            continue;
+          }
+          const published = outcome;
           setTaskState(taskId, "verifying");
           const check = await adapter.getObject(published.externalId);
           d().prepare("UPDATE content_items SET status=?, external_id=? WHERE id=?").run(check.exists ? "published" : "unverified", published.externalId, item.id);
-          actions.push({ operation: step.operation, platform: item.platform, target: item.platform, status: check.exists ? "confirmed" : "accepted_unconfirmed", detail: check.exists ? `Published and read-back confirmed (${published.externalId}).` : `Accepted (${published.externalId}) but not confirmed by read-back.`, externalId: published.externalId });
+          actions.push({ operation: step.operation, platform: item.platform, target: item.platform, status: check.exists ? "confirmed" : "accepted_unconfirmed", detail: check.exists ? `Published and read-back confirmed in ${conn.mode === "sandbox" ? "the sandbox" : "the platform"} (${published.externalId}).` : `Accepted (${published.externalId}) but not confirmed by read-back.`, externalId: published.externalId,
+            verification: classifyExternalVerification({ kind: "publish_post", platform: item.platform, mode: conn.mode, phase: "accepted", externalId: published.externalId, readBack: check }) });
           setTaskState(taskId, "running");
         } catch (e) {
           d().prepare("UPDATE content_items SET status='failed' WHERE id=?").run(item.id);
@@ -401,7 +526,7 @@ async function executeStep(taskId: string, businessId: string, step: StepRow): P
 
     case "generate_report": {
       updateStep(step.id, { detail: "Activity receipt generated from persisted task evidence" });
-      actions.push({ operation: step.operation, target: "receipt", status: "confirmed", detail: "Receipt available at GET /api/tasks/:id/receipt, built from API results and read-back verification — not from model claims." });
+      actions.push({ operation: step.operation, target: "receipt", status: "confirmed", detail: "Receipt available at GET /api/tasks/:id/receipt, assembled from persisted execution records. Each external action carries a verification level stating exactly what evidence backs it (provider response, platform read-back, webhook receipt, or sandbox state) and is never upgraded beyond that evidence — not from model claims." });
       return finish("done");
     }
 

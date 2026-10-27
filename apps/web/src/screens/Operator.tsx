@@ -95,7 +95,7 @@ export default function Operator({ business, go }: { business: Business; go: (s:
     <div className="space-y-5">
       <div>
         <h1 className="text-xl font-black tracking-tight">AI Operator</h1>
-        <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">Describe the outcome. MetaOps plans the steps, executes only authorized operations, pauses for your approval on anything external, then verifies the result.</p>
+        <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">Describe the outcome. FounderFlo Ops plans the steps, executes only authorized operations, pauses for your approval on anything external, then verifies the result.</p>
       </div>
 
       <Card>

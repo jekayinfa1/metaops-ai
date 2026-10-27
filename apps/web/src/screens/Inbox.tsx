@@ -10,7 +10,8 @@ const FILTERS: Array<{ key: string; label: string }> = [
   { key: "whatsapp", label: "WhatsApp" }
 ];
 
-export function categoryLabel(c: string): string {
+export function categoryLabel(c: string | null | undefined): string {
+  if (!c) return "Not yet classified";
   return ({
     product_question: "Product question", pricing: "Pricing", availability: "Availability",
     order_support: "Order support", complaint: "Complaint", booking: "Booking request",

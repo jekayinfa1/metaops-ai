@@ -19,6 +19,20 @@ const BASE = process.env.META_API_BASE || "https://api.meta.ai/v1";
 
 export const aiConfigured = () => Boolean(process.env.MODEL_API_KEY);
 
+/**
+ * Explicit identifying headers for every Meta Model API call. Do NOT rely
+ * on runtime fetch defaults: api.meta.ai returns an EMPTY model catalog
+ * (HTTP 200, no models) to requests carrying neither a User-Agent nor an
+ * Accept header, and POST /responses then 404s model_not_found — observed
+ * live from the Railway deployment (2026-10-27), where the same key that
+ * returns 9 models elsewhere saw an empty list until these headers were
+ * sent explicitly.
+ */
+const META_API_HEADERS = {
+  "User-Agent": "FounderFloOps/1.0 (+https://founderflo-ops-production.up.railway.app)",
+  Accept: "application/json",
+};
+
 export interface ModelApiVerification {
   ok: boolean;
   status: "verified" | "not_configured" | "auth_failed" | "http_error" | "network_error" | "primary_model_not_listed";
@@ -32,24 +46,41 @@ export interface ModelApiVerification {
  * pass. A "verified" result means the key authenticated AND the primary model
  * is listed; it is the minimum evidence for the AI half of Gate A.
  */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function verifyModelApi(): Promise<ModelApiVerification> {
   const key = process.env.MODEL_API_KEY;
   if (!key) return { ok: false, status: "not_configured", detail: "MODEL_API_KEY is not set; the heuristic demo planner is in use and is not Meta AI." };
-  try {
-    const res = await fetch(`${BASE}/models`, { headers: { Authorization: `Bearer ${key}` } });
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, status: "auth_failed", detail: `Meta Model API rejected the configured key (HTTP ${res.status}). Rotate or re-issue the key.` };
+  // Retry on a transient empty / incomplete catalog (2026-10-27): live probes
+  // from a known-good network intermittently returned HTTP 200 with ZERO
+  // models (2 of the first 7 relayed calls, then 28/28 clean), while the
+  // Railway deployment was read as a hard egress block after only a few
+  // attempts per region. An empty catalog is therefore retried, not treated
+  // as a verdict: up to 4 attempts with backoff before reporting failure.
+  // Auth failures (401/403) are NOT retried — those are real.
+  let last: ModelApiVerification | null = null;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const res = await fetch(`${BASE}/models`, { headers: { Authorization: `Bearer ${key}`, ...META_API_HEADERS } });
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, status: "auth_failed", detail: `Meta Model API rejected the configured key (HTTP ${res.status}). Rotate or re-issue the key.` };
+      }
+      if (!res.ok) {
+        last = { ok: false, status: "http_error", detail: `GET /models returned HTTP ${res.status}.` };
+      } else {
+        const json = await res.json() as { data?: Array<{ id?: string }> };
+        const ids = (json.data || []).map((m) => m.id).filter((x): x is string => typeof x === "string");
+        if (ids.includes(PRIMARY_MODEL)) {
+          return { ok: true, status: "verified", detail: `Key authenticated; ${PRIMARY_MODEL} is available.${attempt > 1 ? ` (Recovered on attempt ${attempt} after a transient empty/incomplete catalog.)` : ""}`, modelsSeen: ids.slice(0, 50) };
+        }
+        last = { ok: false, status: "primary_model_not_listed", detail: `Key authenticated, but ${PRIMARY_MODEL} is not in the returned model list.`, modelsSeen: ids.slice(0, 50) };
+      }
+    } catch (e) {
+      last = { ok: false, status: "network_error", detail: `Could not reach the Meta Model API: ${String(e).slice(0, 160)}` };
     }
-    if (!res.ok) return { ok: false, status: "http_error", detail: `GET /models returned HTTP ${res.status}.` };
-    const json = await res.json() as { data?: Array<{ id?: string }> };
-    const ids = (json.data || []).map((m) => m.id).filter((x): x is string => typeof x === "string");
-    if (!ids.includes(PRIMARY_MODEL)) {
-      return { ok: false, status: "primary_model_not_listed", detail: `Key authenticated, but ${PRIMARY_MODEL} is not in the returned model list.`, modelsSeen: ids.slice(0, 50) };
-    }
-    return { ok: true, status: "verified", detail: `Key authenticated; ${PRIMARY_MODEL} is available.`, modelsSeen: ids.slice(0, 50) };
-  } catch (e) {
-    return { ok: false, status: "network_error", detail: `Could not reach the Meta Model API: ${String(e).slice(0, 160)}` };
+    if (attempt < 4) await sleep(250 * attempt);
   }
+  return last!;
 }
 export function activePlannerModel() { return aiConfigured() ? PRIMARY_MODEL : DEMO_HEURISTIC_MODEL; }
 
@@ -63,19 +94,48 @@ async function metaJson<T>(taskId: string | null, purpose: string, system: strin
   const key = process.env.MODEL_API_KEY;
   if (!key) throw new Error("meta_not_configured");
   const started = Date.now();
-  const res = await fetch(`${BASE}/responses`, {
+  // Transient-failure retry (2026-10-27, same evidence as verifyModelApi):
+  // a 404 model_not_found or a 5xx from the Responses API is retried up to
+  // 3 attempts total with backoff — the empty-catalog probes show this
+  // provider intermittently routes to a backend that does not know the model.
+  // Other 4xx fail fast, unchanged — including 402 billing_not_configured
+  // and 429 (the documented no-429-retry finding is a separate open item).
+  let res: Response | null = null;
+  let text = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    res = await fetch(`${BASE}/responses`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...META_API_HEADERS },
     body: JSON.stringify({
       model,
+      // Prompt caching (Responses API, see AI_USAGE.md): every prompt this
+      // client sends is static-prefix-first — system prompt, then the
+      // business-facts block, then the per-message data — which is exactly
+      // the shape the server's prompt cache matches on. Live probe
+      // (2026-10-26): an identical-prefix repeat WITHOUT a cache key
+      // reported usage.input_tokens_details.cached_tokens = 0; WITH a
+      // stable prompt_cache_key the repeat reported 94-99% of input tokens
+      // as cached (billed at the cached-input rate). The key is a routing
+      // hint keyed by purpose; the server still matches on content, so
+      // different businesses never share cached content. Retention "24h"
+      // is a documented hint (not a guarantee) that lets a business's facts
+      // prefix survive between operator runs. Neither field changes the
+      // request's model-visible content or the output contract.
+      prompt_cache_key: `metaops-${purpose}`,
+      prompt_cache_retention: "24h",
       input: [
         { role: "system", content: [{ type: "input_text", text: system }] },
         { role: "user", content: [{ type: "input_text", text: user }] }
       ]
     })
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`meta_api_${res.status}: ${text.slice(0, 200)}`);
+    });
+    text = await res.text();
+    if (res.ok) break;
+    const transient = (res.status === 404 && text.includes("model_not_found")) || res.status >= 500;
+    if (!transient || attempt === 3) throw new Error(`meta_api_${res.status}: ${text.slice(0, 200)}`);
+    await sleep(250 * attempt);
+  }
+  if (!res?.ok) throw new Error(`meta_api_${res?.status ?? 0}: ${text.slice(0, 200)}`);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const json = JSON.parse(text) as any;
   const outText: string = (json.output ?? [])
@@ -96,16 +156,30 @@ async function metaJson<T>(taskId: string | null, purpose: string, system: strin
 
 const PLANNER_SYSTEM = `You are the planning component of MetaOps AI. Return ONLY a JSON object matching:
 {"objective": string, "steps": [{"operation": one of [list_eligible_messages, classify_conversations, draft_replies, send_approved_replies, identify_leads, create_content_drafts, publish_approved_content, generate_report], "platform": optional, "requiresApproval": boolean, "rationale": string}]}
-Rules: propose only allowlisted operations; external sends/publishes always require approval; never invent operations; end with generate_report when a summary is requested.`;
+Rules: propose only allowlisted operations; external sends/publishes always require approval; never invent operations; end with generate_report when a summary is requested.
+Step limit: the plan must contain AT MOST 12 steps. Merge related operations into a single step instead of emitting near-duplicate steps per platform or per item.`;
 
 export async function planObjective(taskId: string, objective: string, capabilities: string[]): Promise<{ plan: Plan; model: string }> {
   if (aiConfigured()) {
-    const r = await metaJson<unknown>(taskId, "plan", PLANNER_SYSTEM,
-      `Objective: ${objective}
-Connected capabilities: ${capabilities.join(", ") || "none"}`);
+    const userPrompt = `Objective: ${objective}
+Connected capabilities: ${capabilities.join(", ") || "none"}`;
+    const r = await metaJson<unknown>(taskId, "plan", PLANNER_SYSTEM, userPrompt);
     const v = validatePlan(r.data);
-    if (!v.ok || !v.plan) throw new Error("invalid_model_plan: " + v.reason);
-    return { plan: v.plan, model: r.model };
+    if (v.ok && v.plan) return { plan: v.plan, model: r.model };
+    // Exactly ONE corrective re-ask (founder-approved 2026-10-26): the live
+    // planner intermittently returns plans over the 12-step schema cap and,
+    // with no correction path, the whole run died at planning. The re-ask
+    // carries the validation error and asks for a corrected plan within the
+    // schema limits. If the corrected plan also fails validation, planning
+    // fails with the same invalid_model_plan error as before — no loop.
+    const r2 = await metaJson<unknown>(taskId, "plan_correction", PLANNER_SYSTEM,
+      `${userPrompt}
+
+Your previous plan was rejected by schema validation: ${v.reason}
+Return a corrected plan that satisfies every schema constraint — most importantly at most 12 steps — merging related operations into single steps instead of repeating near-identical steps per platform or per item.`);
+    const v2 = validatePlan(r2.data);
+    if (!v2.ok || !v2.plan) throw new Error("invalid_model_plan: " + v2.reason);
+    return { plan: v2.plan, model: r2.model };
   }
   const plan = heuristicPlan(objective);
   logCall(taskId, "plan", { model: DEMO_HEURISTIC_MODEL, inputTokens: 0, outputTokens: 0, latencyMs: 1 });
@@ -254,9 +328,12 @@ Brief: ${brief}`);
 
 export function approxCostUsd(model: string, inputTokens: number, outputTokens: number): number {
   if (model.startsWith("demo-heuristic")) return 0;
-  // Rates per Meta Model API pricing (dev.meta.ai), verified 2026-10-25:
+  // Rates per Meta Model API pricing (dev.meta.ai), verified 2026-10-25 and
+  // re-corroborated 2026-10-26 (see AI_USAGE.md):
   // muse-wonder-1.0 $4.00 in / $20.00 out; muse-spark-1.3 Standard $1.25 in / $4.25 out.
-  // Cached input is cheaper ($0.20 / $0.15) but not split out here, so costs are upper bounds.
+  // Cached input is cheaper ($0.20 / $0.15) and metaJson now sends a stable
+  // prompt_cache_key so repeat prefixes are served from cache — but ai_calls
+  // does not split cached tokens out, so this stays an upper bound.
   const inRate = model.includes("spark") ? 1.25 : 4.0;
   const outRate = model.includes("spark") ? 4.25 : 20.0;
   return (inputTokens / 1e6) * inRate + (outputTokens / 1e6) * outRate;

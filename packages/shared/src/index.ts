@@ -65,10 +65,53 @@ export function validatePlan(raw: unknown): { ok: boolean; plan?: Plan; reason?:
   return { ok: true, plan: parsed.data };
 }
 
+/**
+ * Verification taxonomy for external (platform) actions. A level is a claim
+ * about evidence, never about intent: an action may only carry the strongest
+ * level its recorded evidence supports, and must never be upgraded beyond it.
+ * - request_attempted: a provider call was made; no outcome evidence yet.
+ * - provider_accepted: the provider responded successfully to the request.
+ * - provider_id_returned: the provider returned an object/message identifier.
+ * - object_confirmed: a platform read-back fetched the object and it exists.
+ * - delivered / read: a provider webhook receipt evidences delivery / read.
+ * - published: read-back confirms the published object on the platform.
+ * - objective_verified: the end objective was independently verified beyond
+ *   the provider's own API surface. No adapter evidence earns this today.
+ * - unverified: nothing stronger can honestly be claimed (see reason).
+ */
+export type VerificationLevel =
+  | "request_attempted" | "provider_accepted" | "provider_id_returned"
+  | "object_confirmed" | "delivered" | "read" | "published"
+  | "objective_verified" | "unverified";
+
+/** What kind of evidence backs a verification level. */
+export type VerificationBasis =
+  | "provider_response"   // the provider's own response to our request
+  | "platform_readback"   // a later fetch of the object from the platform
+  | "webhook_receipt"     // an authenticated provider webhook (delivery/read)
+  | "sandbox_state"       // state inside the simulated sandbox environment
+  | "persisted_state"     // our own persisted records only (weakest)
+  | "none";               // no evidence recorded
+
+export interface VerificationAssessment {
+  level: VerificationLevel;
+  basis: VerificationBasis;
+  /** Sandbox outcomes stay labelled sandbox; they are never live evidence. */
+  mode: "live" | "sandbox" | "internal";
+  /** Human-readable description of the concrete evidence behind the level. */
+  evidence: string;
+  /** Required when level is "unverified": why nothing stronger is claimed. */
+  reason?: string;
+}
+
 export interface ReceiptAction {
   operation: string; platform?: string; target: string;
   status: "confirmed" | "accepted_unconfirmed" | "pending_approval" | "blocked" | "failed" | "unverified" | "skipped";
   detail: string; externalId?: string;
+  /** Structured verification for external actions; absent on internal steps and legacy receipts. */
+  verification?: VerificationAssessment;
+  /** The exact draft text this action produced or audited (draft/audit actions). */
+  draft?: string;
 }
 export interface ActivityReceipt {
   taskId: string; businessId: string; objective: string;

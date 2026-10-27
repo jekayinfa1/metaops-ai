@@ -1,17 +1,32 @@
 import type { ReactNode } from "react";
+import { siFacebook, siInstagram, siMessenger, siWhatsapp } from "simple-icons";
+import type { SimpleIcon } from "simple-icons";
 import type { Platform } from "../lib/api";
 
+// Real brand glyphs (path data from the simple-icons package) rendered in
+// white on each platform's brand tile. Tile size/rounding match the old
+// letter badges exactly, so no layout changes anywhere the badge appears.
+const PLATFORM_BRANDS: Record<string, { name: string; icon: SimpleIcon; cls: string }> = {
+  facebook: { name: "Facebook", icon: siFacebook, cls: "bg-[#1877F2] text-white" },
+  instagram: { name: "Instagram", icon: siInstagram, cls: "bg-gradient-to-tr from-amber-500 via-pink-600 to-purple-600 text-white" },
+  messenger: { name: "Messenger", icon: siMessenger, cls: "bg-gradient-to-tr from-[#0099FF] via-[#A033FF] to-[#FF5280] text-white" },
+  whatsapp: { name: "WhatsApp", icon: siWhatsapp, cls: "bg-[#25D366] text-white" }
+};
+
 export function PlatformBadge({ platform }: { platform: Platform | string }) {
-  const map: Record<string, { label: string; cls: string }> = {
-    facebook: { label: "FB", cls: "bg-blue-600 text-white" },
-    instagram: { label: "IG", cls: "bg-gradient-to-tr from-amber-500 via-pink-600 to-purple-600 text-white" },
-    messenger: { label: "MS", cls: "bg-sky-500 text-white" },
-    whatsapp: { label: "WA", cls: "bg-green-600 text-white" }
-  };
-  const m = map[platform] ?? { label: String(platform).slice(0, 2).toUpperCase(), cls: "bg-slate-500 text-white" };
+  const brand = PLATFORM_BRANDS[platform];
+  if (!brand) {
+    return (
+      <span title={String(platform)} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-slate-500 text-[10px] font-bold text-white">
+        {String(platform).slice(0, 2).toUpperCase()}
+      </span>
+    );
+  }
   return (
-    <span title={String(platform)} className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[10px] font-bold ${m.cls}`}>
-      {m.label}
+    <span title={brand.name} role="img" aria-label={brand.name} className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${brand.cls}`}>
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden="true" focusable="false">
+        <path d={brand.icon.path} />
+      </svg>
     </span>
   );
 }

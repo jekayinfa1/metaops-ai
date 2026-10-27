@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { getDb, audit } from "../db/store.js";
-import { hashPassword, verifyPassword, signToken, verifyToken, encryptSecret, payloadHash, sha256hex } from "../services/security.js";
+import { hashPassword, verifyPassword, signToken, verifyToken, encryptSecret, payloadHash, sha256hex, randomToken, AttemptLimiter } from "../services/security.js";
 import { adapterFor } from "../adapters/factory.js";
 import type { ConnectionRow } from "../adapters/types.js";
 import { createTask, pauseTask, resumeTask, cancelTask, subscribeTask, emit } from "../services/engine.js";
@@ -10,20 +10,93 @@ import { buildReceipt } from "../services/receipt.js";
 import { aiConfigured, verifyModelApi, PRIMARY_MODEL, ALT_MODEL, DEMO_HEURISTIC_MODEL } from "../services/ai.js";
 import { HARBOR_BUSINESS, HARBOR_PRODUCTS } from "../services/seed-data.js";
 
-const TOKEN_TTL = 12 * 3600 * 1000;
+const TOKEN_TTL = 8 * 3600 * 1000;
 const now = () => new Date().toISOString();
-interface Auth { sub: string; email: string; exp: number }
+interface Auth { sub: string; email: string; exp: number; jti?: string }
 
-export function requireAuth(req: { headers: Record<string, string | string[] | undefined>; query?: unknown }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): Auth | null {
+// ---- server-side session registry -------------------------------------------
+// Session tokens are HMAC-signed AND registered server-side, so they can be
+// revoked before expiry: sign-out kills the current session, and a password
+// change or "sign out everywhere" kills them all. (Previously tokens were
+// purely stateless — a leaked token was valid until expiry, with no remedy.)
+let sessionsReady = false;
+function ensureSessions(): void {
+  if (sessionsReady) return;
+  getDb().exec(`CREATE TABLE IF NOT EXISTS sessions (
+    jti TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL,
+    expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)`);
+  sessionsReady = true;
+}
+function issueSession(userId: string, email: string): string {
+  ensureSessions();
+  const jti = randomUUID();
+  getDb().prepare("INSERT INTO sessions (jti, user_id, created_at, expires_at) VALUES (?,?,?,?)")
+    .run(jti, userId, now(), Date.now() + TOKEN_TTL);
+  getDb().prepare("DELETE FROM sessions WHERE expires_at < ?").run(Date.now()); // opportunistic cleanup
+  return signToken({ sub: userId, email, jti }, TOKEN_TTL);
+}
+function sessionValid(jti: string): boolean {
+  ensureSessions();
+  const row = getDb().prepare("SELECT revoked, expires_at as expiresAt FROM sessions WHERE jti=?")
+    .get(jti) as unknown as { revoked: number; expiresAt: number } | undefined;
+  return Boolean(row) && row!.revoked === 0 && row!.expiresAt > Date.now();
+}
+function revokeSession(jti: string): void {
+  ensureSessions();
+  getDb().prepare("UPDATE sessions SET revoked=1 WHERE jti=?").run(jti);
+}
+function revokeAllSessions(userId: string): number {
+  ensureSessions();
+  const res = getDb().prepare("UPDATE sessions SET revoked=1 WHERE user_id=? AND revoked=0").run(userId) as unknown as { changes: number };
+  return res.changes;
+}
+
+// Auth-endpoint attempt limiters (in-memory, per process). Login is keyed by
+// IP+email and counts FAILURES only (a success clears the key); registration
+// is keyed by IP and counts every attempt. Both sit far below the global
+// 600/min ceiling and far above legitimate test/demo traffic.
+const loginLimiter = new AttemptLimiter(10 * 60 * 1000, 15);
+const registerLimiter = new AttemptLimiter(10 * 60 * 1000, 30);
+let dummyPasswordHash: string | null = null;
+
+export function requireAuth(req: { headers: Record<string, string | string[] | undefined>; query?: unknown }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }, opts: { allowQueryToken?: boolean } = {}): Auth | null {
   const header = req.headers.authorization;
   let token = typeof header === "string" && header.startsWith("Bearer ") ? header.slice(7) : null;
-  if (!token && req.query && typeof req.query === "object") token = (req.query as { token?: string }).token ?? null;
+  // Query-string tokens are accepted ONLY where a header cannot be set (the
+  // SSE events stream, whose EventSource client has no header API). Tokens in
+  // URLs leak into logs and history, so every other route requires the header.
+  if (!token && opts.allowQueryToken && req.query && typeof req.query === "object") token = (req.query as { token?: string }).token ?? null;
   const payload = token ? verifyToken<Auth>(token) : null;
   if (!payload) { reply.code(401).send({ error: "unauthorized" }); return null; }
+  // Registered sessions must still exist, be unrevoked, and be unexpired.
+  // (Tokens without a jti are only ever minted by this server's own signing
+  // key in tests/tools, never issued to clients, so they take the legacy path.)
+  if (payload.jti && !sessionValid(payload.jti)) { reply.code(401).send({ error: "session_revoked" }); return null; }
   return payload;
 }
 
 export async function apiRoutes(app: FastifyInstance) {
+  // The web client sends "Content-Type: application/json" on EVERY request,
+  // including action POSTs with no body at all (task pause/resume/cancel,
+  // approval approve/reject, logout/logout-all). Fastify's default JSON
+  // parser rejects a zero-length body with 400 (FST_ERR_CTP_EMPTY_JSON_BODY),
+  // which silently broke those controls in the UI. Scoped to this plugin —
+  // the same approach the webhook scope uses — an empty JSON body parses as
+  // {}, while malformed JSON still fails with a 400 parser error and valid
+  // bodies parse exactly as before. (The webhook parser deliberately swallows
+  // parse errors to {}; this one must not, or bad client payloads would
+  // silently become empty objects.)
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    const text = body as string;
+    if (text.length === 0) return done(null, {});
+    try { done(null, JSON.parse(text)); }
+    catch {
+      const err = new Error("invalid_json_body") as Error & { statusCode: number };
+      err.statusCode = 400;
+      done(err, undefined);
+    }
+  });
+
   const d = () => getDb();
   const ownBusiness = (userId: string, id: string) =>
     d().prepare("SELECT * FROM businesses WHERE id=? AND user_id=?").get(id, userId) as Record<string, unknown> | undefined;
@@ -46,20 +119,67 @@ export async function apiRoutes(app: FastifyInstance) {
 
   // ---- auth ----
   app.post("/api/auth/register", async (req, reply) => {
+    const regKey = `register|${req.ip}`;
+    if (registerLimiter.isBlocked(regKey)) return reply.code(429).send({ error: "too_many_attempts" });
+    registerLimiter.fail(regKey);
     const body = z.object({ email: z.string().email(), password: z.string().min(8).max(128) }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "invalid_email_or_password" });
     if (d().prepare("SELECT id FROM users WHERE email=?").get(body.data.email)) return reply.code(409).send({ error: "email_already_registered" });
     const id = randomUUID();
     d().prepare("INSERT INTO users (id, email, password_hash, created_at) VALUES (?,?,?,?)").run(id, body.data.email, hashPassword(body.data.password), now());
     audit("user:" + id, "registered");
-    return { token: signToken({ sub: id, email: body.data.email }, TOKEN_TTL), userId: id };
+    return { token: issueSession(id, body.data.email), userId: id };
   });
   app.post("/api/auth/login", async (req, reply) => {
     const body = z.object({ email: z.string().email(), password: z.string().min(1) }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "invalid_request" });
+    const key = `${req.ip}|${body.data.email.toLowerCase()}`;
+    if (loginLimiter.isBlocked(key)) return reply.code(429).send({ error: "too_many_attempts" });
     const row = d().prepare("SELECT id, password_hash as passwordHash FROM users WHERE email=?").get(body.data.email) as unknown as { id: string; passwordHash: string } | undefined;
-    if (!row || !verifyPassword(body.data.password, row.passwordHash)) return reply.code(401).send({ error: "invalid_credentials" });
-    return { token: signToken({ sub: row.id, email: body.data.email }, TOKEN_TTL), userId: row.id };
+    if (!row) {
+      // Run scrypt against a dummy hash anyway, so a missing account costs the
+      // same time as a wrong password and does not leak existence via timing.
+      dummyPasswordHash ??= hashPassword(randomToken(16));
+      verifyPassword(body.data.password, dummyPasswordHash);
+      loginLimiter.fail(key);
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+    if (!verifyPassword(body.data.password, row.passwordHash)) {
+      loginLimiter.fail(key);
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+    loginLimiter.succeed(key);
+    return { token: issueSession(row.id, body.data.email), userId: row.id };
+  });
+  app.post("/api/auth/logout", async (req, reply) => {
+    const auth = requireAuth(req, reply); if (!auth) return;
+    if (auth.jti) revokeSession(auth.jti);
+    audit("user:" + auth.sub, "logout");
+    return { ok: true };
+  });
+  app.post("/api/auth/logout-all", async (req, reply) => {
+    const auth = requireAuth(req, reply); if (!auth) return;
+    const revoked = revokeAllSessions(auth.sub);
+    audit("user:" + auth.sub, "logout_all", `${revoked} session(s)`);
+    return { ok: true, revoked };
+  });
+  app.post("/api/auth/change-password", async (req, reply) => {
+    const auth = requireAuth(req, reply); if (!auth) return;
+    const body = z.object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(8).max(128) }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "invalid_password" });
+    const key = `${req.ip}|${auth.email.toLowerCase()}`;
+    if (loginLimiter.isBlocked(key)) return reply.code(429).send({ error: "too_many_attempts" });
+    const row = d().prepare("SELECT password_hash as passwordHash FROM users WHERE id=?").get(auth.sub) as unknown as { passwordHash: string } | undefined;
+    if (!row || !verifyPassword(body.data.currentPassword, row.passwordHash)) {
+      loginLimiter.fail(key);
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+    d().prepare("UPDATE users SET password_hash=? WHERE id=?").run(hashPassword(body.data.newPassword), auth.sub);
+    // A password change revokes EVERY existing session for the account; the
+    // caller receives one fresh session in the response.
+    revokeAllSessions(auth.sub);
+    audit("user:" + auth.sub, "password_changed");
+    return { token: issueSession(auth.sub, auth.email), userId: auth.sub };
   });
 
   // ---- businesses & knowledge base ----
@@ -283,9 +403,11 @@ export async function apiRoutes(app: FastifyInstance) {
     d().prepare("INSERT INTO approvals (id, business_id, task_id, kind, platform, summary, payload_json, payload_hash, status, created_at) VALUES (?,?,?,?,?,?,?,?, 'pending', ?)")
       .run(nid, row.business_id, row.task_id, row.kind, row.platform, row.summary, JSON.stringify(body.data.payload), payloadHash(body.data.payload), now());
     // If the edit changed a message body, sync the conversation's suggested reply so the engine sends the edited text.
+    // Both updates are scoped to the approval's own business: a crafted payload
+    // must never be able to write into another business's rows by id.
     const p = body.data.payload as { conversationId?: string; body?: string; contentId?: string; caption?: string };
-    if (p.conversationId && typeof p.body === "string") d().prepare("UPDATE conversations SET suggested_reply=? WHERE id=?").run(p.body, p.conversationId);
-    if (p.contentId && typeof p.caption === "string") d().prepare("UPDATE content_items SET caption=? WHERE id=?").run(p.caption, p.contentId);
+    if (p.conversationId && typeof p.body === "string") d().prepare("UPDATE conversations SET suggested_reply=? WHERE id=? AND business_id=?").run(p.body, p.conversationId, row.business_id);
+    if (p.contentId && typeof p.caption === "string") d().prepare("UPDATE content_items SET caption=? WHERE id=? AND business_id=?").run(p.caption, p.contentId, row.business_id);
     return { approval: d().prepare("SELECT * FROM approvals WHERE id=?").get(nid), invalidated: id };
   });
 
@@ -312,9 +434,11 @@ export async function apiRoutes(app: FastifyInstance) {
     if (!task) return reply.code(404).send({ error: "task_not_found" });
     return { task, steps: d().prepare("SELECT * FROM task_steps WHERE task_id=? ORDER BY seq").all(id) };
   });
-  app.post("/api/tasks/:id/pause", async (req, reply) => { const auth = requireAuth(req, reply); if (!auth) return; pauseTask((req.params as { id: string }).id); return { ok: true }; });
-  app.post("/api/tasks/:id/resume", async (req, reply) => { const auth = requireAuth(req, reply); if (!auth) return; resumeTask((req.params as { id: string }).id); return { ok: true }; });
-  app.post("/api/tasks/:id/cancel", async (req, reply) => { const auth = requireAuth(req, reply); if (!auth) return; cancelTask((req.params as { id: string }).id); return { ok: true }; });
+  const ownTask = (userId: string, id: string) =>
+    d().prepare("SELECT t.id FROM tasks t JOIN businesses b ON b.id=t.business_id WHERE t.id=? AND b.user_id=?").get(id, userId);
+  app.post("/api/tasks/:id/pause", async (req, reply) => { const auth = requireAuth(req, reply); if (!auth) return; const { id } = req.params as { id: string }; if (!ownTask(auth.sub, id)) return reply.code(404).send({ error: "task_not_found" }); pauseTask(id); return { ok: true }; });
+  app.post("/api/tasks/:id/resume", async (req, reply) => { const auth = requireAuth(req, reply); if (!auth) return; const { id } = req.params as { id: string }; if (!ownTask(auth.sub, id)) return reply.code(404).send({ error: "task_not_found" }); resumeTask(id); return { ok: true }; });
+  app.post("/api/tasks/:id/cancel", async (req, reply) => { const auth = requireAuth(req, reply); if (!auth) return; const { id } = req.params as { id: string }; if (!ownTask(auth.sub, id)) return reply.code(404).send({ error: "task_not_found" }); cancelTask(id); return { ok: true }; });
   app.get("/api/tasks/:id/receipt", async (req, reply) => {
     const auth = requireAuth(req, reply); if (!auth) return;
     const { id } = req.params as { id: string };
@@ -323,8 +447,13 @@ export async function apiRoutes(app: FastifyInstance) {
     return buildReceipt(id);
   });
   app.get("/api/tasks/:id/events", async (req, reply) => {
-    const auth = requireAuth(req, reply); if (!auth) return;
+    // The one route that accepts a query-string token: EventSource cannot set
+    // an Authorization header. Ownership is verified before the stream opens,
+    // so a token only ever streams its owner's task events.
+    const auth = requireAuth(req, reply, { allowQueryToken: true }); if (!auth) return;
     const { id } = req.params as { id: string };
+    const owned = d().prepare("SELECT t.id FROM tasks t JOIN businesses b ON b.id=t.business_id WHERE t.id=? AND b.user_id=?").get(id, auth.sub);
+    if (!owned) return reply.code(404).send({ error: "task_not_found" });
     reply.raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     const send = (data: string) => reply.raw.write(`data: ${data}
 

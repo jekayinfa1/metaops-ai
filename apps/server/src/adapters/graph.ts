@@ -1,5 +1,5 @@
 import { decryptSecret } from "../services/security.js";
-import type { PlatformAdapter, Capability, ExternalConversation, ConnectionRow } from "./types.js";
+import type { PlatformAdapter, Capability, ExternalConversation, ConnectionRow, SendTarget, TemplateSpec } from "./types.js";
 
 const VERSION = process.env.GRAPH_API_VERSION || "v21.0";
 const BASE = `https://graph.facebook.com/${VERSION}`;
@@ -95,35 +95,88 @@ export class GraphAdapter implements PlatformAdapter {
     return [];
   }
 
-  async sendMessage(threadExternalId: string, body: string, _idempotencyKey: string) {
+  async sendMessage(target: SendTarget, body: string, _idempotencyKey: string) {
+    // The recipient is always the platform-scoped customer id (PSID / phone),
+    // never the conversation id: the Send API addresses users, not threads.
+    if (!target.recipientId) throw new Error(`${this.platform}_recipient_missing: conversation has no customer recipient id`);
     if (this.platform === "whatsapp") {
+      // Free-form text is only valid inside the 24h service window; the engine
+      // routes out-of-window conversations to sendTemplate instead.
       const data = (await this.graph(`/${this.conn.externalAccountId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ messaging_product: "whatsapp", to: threadExternalId, type: "text", text: { body } })
+        body: JSON.stringify({ messaging_product: "whatsapp", to: target.recipientId, type: "text", text: { body } })
       })) as { messages?: Array<{ id: string }> };
       const id = data.messages?.[0]?.id;
       if (!id) throw new Error("whatsapp_send_no_message_id");
       return { externalId: id, acceptedAt: new Date().toISOString() };
     }
-    // Messenger platform Send API (Page token). threadExternalId is the PSID-scoped conversation;
-    // in practice recipient is the customer PSID stored on the conversation record upstream.
+    // Messenger platform Send API (Page token) — also serves Facebook-page and
+    // Instagram DM conversations. recipient.id is the customer's PSID/IGSID
+    // (persisted upstream as the conversation's customer_ref), NOT the
+    // conversation id returned by /{page-id}/conversations.
     const data = (await this.graph(`/me/messages`, {
       method: "POST",
-      body: JSON.stringify({ recipient: { id: threadExternalId }, messaging_type: "RESPONSE", message: { text: body } })
+      body: JSON.stringify({ recipient: { id: target.recipientId }, messaging_type: "RESPONSE", message: { text: body } })
     })) as { message_id?: string };
     if (!data.message_id) throw new Error("messenger_send_no_message_id");
     return { externalId: data.message_id, acceptedAt: new Date().toISOString() };
   }
 
-  async publishPost(caption: string, _idempotencyKey: string) {
+  /**
+   * WhatsApp template send. A template is sent ONLY after verifying against
+   * the WhatsApp Business Account that an APPROVED template with the exact
+   * name (and language) exists. If the WABA cannot be resolved from the
+   * connection's phone-number id, or no approved template matches, this
+   * throws a whatsapp_template_* error and sends nothing — the caller
+   * records the action as blocked/unverifiable rather than falling back to
+   * a free-form text send.
+   */
+  async sendTemplate(target: SendTarget, template: TemplateSpec, _idempotencyKey: string) {
+    if (this.platform !== "whatsapp") throw new Error(`template_not_supported_for_${this.platform}`);
+    if (!target.recipientId) throw new Error("whatsapp_recipient_missing: conversation has no customer recipient id");
+    const phoneId = this.conn.externalAccountId;
+    const phone = (await this.graph(`/${phoneId}?fields=whatsapp_business_account`)) as { whatsapp_business_account?: { id?: string } };
+    const wabaId = phone.whatsapp_business_account?.id;
+    if (!wabaId) throw new Error("whatsapp_template_unverifiable: connection does not resolve to a WhatsApp Business Account, so template approval cannot be verified");
+    const list = (await this.graph(`/${wabaId}/message_templates?fields=name,status,language&limit=200`)) as { data?: Array<{ name?: string; status?: string; language?: string }> };
+    const match = (list.data ?? []).find((t) => t.name === template.name && t.status === "APPROVED" && (!template.language || t.language === template.language));
+    if (!match) throw new Error(`whatsapp_template_not_approved: no APPROVED template named "${template.name}" (${template.language}) on the WhatsApp Business Account`);
+    const data = (await this.graph(`/${phoneId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp", to: target.recipientId, type: "template",
+        template: { name: template.name, language: { code: template.language } }
+      })
+    })) as { messages?: Array<{ id: string }> };
+    const id = data.messages?.[0]?.id;
+    if (!id) throw new Error("whatsapp_send_no_message_id");
+    return { externalId: id, acceptedAt: new Date().toISOString() };
+  }
+
+  async publishPost(caption: string, _idempotencyKey: string, mediaUrl?: string) {
     if (this.platform === "facebook") {
       const data = (await this.graph(`/${this.conn.externalAccountId}/feed`, { method: "POST", body: JSON.stringify({ message: caption }) })) as { id?: string };
       if (!data.id) throw new Error("facebook_publish_no_post_id");
       return { externalId: data.id, acceptedAt: new Date().toISOString() };
     }
     if (this.platform === "instagram") {
-      // Two-step container flow requires an image/video URL; text-only posts are not supported by the IG API.
-      throw new Error("instagram_publish_requires_media_url: provide media in the content draft (not supported for text-only drafts)");
+      // The IG publishing API has no text-only post: a media container must be
+      // created from an image/video URL first, then published. Without a
+      // media URL the honest answer is a refusal, not a fake success.
+      if (!mediaUrl) {
+        throw new Error("instagram_publish_requires_media_url: provide media in the content draft (not supported for text-only drafts)");
+      }
+      const container = (await this.graph(`/${this.conn.externalAccountId}/media`, {
+        method: "POST",
+        body: JSON.stringify({ image_url: mediaUrl, caption })
+      })) as { id?: string };
+      if (!container.id) throw new Error("instagram_publish_no_container_id");
+      const published = (await this.graph(`/${this.conn.externalAccountId}/media_publish`, {
+        method: "POST",
+        body: JSON.stringify({ creation_id: container.id })
+      })) as { id?: string };
+      if (!published.id) throw new Error("instagram_publish_no_media_id");
+      return { externalId: published.id, acceptedAt: new Date().toISOString() };
     }
     throw new Error(`publish_not_supported_for_${this.platform}`);
   }

@@ -56,7 +56,10 @@ export async function oauthRoutes(app: FastifyInstance) {
       audit("user:" + row.user_id, "oauth_pages_fetched", `${pages.length} page(s)`);
       return done({ session: sessionId });
     } catch (e) {
-      audit("user:" + row.user_id, "oauth_exchange_failed", e instanceof Error ? e.message : "unknown");
+      const msg = e instanceof Error ? e.message : "unknown";
+      audit("user:" + row.user_id, "oauth_exchange_failed", msg);
+      // Surface the Graph/transport error class in server logs (never the code or secret).
+      console.error("oauth_exchange_failed:", msg);
       return done({ error: "exchange_failed" });
     }
   });
@@ -108,8 +111,18 @@ export async function oauthRoutes(app: FastifyInstance) {
       }
       created.push({ platform, externalAccountId: externalId, displayName });
     };
+    const cfg = oauthConfig();
     for (const p of selected) {
-      const perms = p.perms.length ? p.perms : OAUTH_SCOPES;
+      // p.perms carries Page *tasks* (MANAGE, CREATE_CONTENT...), not OAuth
+      // scopes. Capability checks need the scopes, so ask Meta via
+      // debug_token; fall back to the requested scope set if that fails.
+      let perms: string[] = OAUTH_SCOPES;
+      if (cfg) {
+        try {
+          const dbg = await debugToken(cfg, p.accessToken);
+          if (dbg.scopes.length) perms = dbg.scopes;
+        } catch { /* keep the fallback */ }
+      }
       upsert("facebook", p.pageId, p.name, p.accessToken, perms);
       if (p.instagramId) upsert("instagram", p.instagramId, p.instagramName ? `@${p.instagramName}` : `${p.name} (Instagram)`, p.accessToken, perms);
     }
@@ -132,8 +145,14 @@ export async function oauthRoutes(app: FastifyInstance) {
     if (!token) return { isValid: false, reason: "token_undecryptable" };
     try {
       const health = await debugToken(cfg, token);
-      d().prepare("UPDATE connections SET token_expires_at=?, status=? WHERE id=?")
-        .run(health.expiresAt, health.isValid ? "connected" : "token_invalid", id);
+      // Persist the scopes Meta actually reports: capability checks read
+      // permissions_json, and the connect-time snapshot can hold Page tasks
+      // (MANAGE, CREATE_CONTENT...) instead of OAuth scopes.
+      const upd = health.scopes.length
+        ? d().prepare("UPDATE connections SET token_expires_at=?, status=?, permissions_json=? WHERE id=?")
+        : d().prepare("UPDATE connections SET token_expires_at=?, status=? WHERE id=?");
+      if (health.scopes.length) upd.run(health.expiresAt, health.isValid ? "connected" : "token_invalid", JSON.stringify(health.scopes), id);
+      else upd.run(health.expiresAt, health.isValid ? "connected" : "token_invalid", id);
       return { isValid: health.isValid, expiresAt: health.expiresAt, scopes: health.scopes, type: health.type };
     } catch (e) {
       return reply.code(502).send({ error: "debug_token_failed", message: e instanceof Error ? e.message : "unknown" });
